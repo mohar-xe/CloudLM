@@ -54,7 +54,7 @@ class AwsProvider(FabricProvider):
                         ResourceSnapshot(
                             resource_arn=_EC2.format(
                                 region=inst["Placement"]["AvailabilityZone"][:-1],
-                                account=inst["OwnerId"],
+                                account=reservation["OwnerId"],
                                 kind="instance",
                                 id_=inst["InstanceId"],
                             ),
@@ -71,40 +71,44 @@ class AwsProvider(FabricProvider):
                             tags={t["Key"]: t["Value"] for t in inst.get("Tags", [])},
                         )
                     )
-        vols = self._ec2.describe_volumes()
-        for vol in vols["Volumes"]:
-            out.append(
-                ResourceSnapshot(
-                    resource_arn=_EC2.format(
-                        region=self._region, account="0", kind="volume", id_=vol["VolumeId"]
-                    ),
-                    resource_type="ebs_volume",
-                    domain=Domain.STORAGE,
-                    region=self._region,
-                    hourly_cost=round(vol["Size"] * 0.00011, 5),
-                    created_at=vol["CreateTime"],
-                    collected_at=collected,
-                    status=Status.OK,
-                    parent_state=vol["State"],
+        for vol_page in self._ec2.get_paginator("describe_volumes").paginate():
+            for vol in vol_page["Volumes"]:
+                out.append(
+                    ResourceSnapshot(
+                        resource_arn=_EC2.format(
+                            region=self._region, account="0", kind="volume", id_=vol["VolumeId"]
+                        ),
+                        resource_type="ebs_volume",
+                        domain=Domain.STORAGE,
+                        region=self._region,
+                        hourly_cost=round(vol["Size"] * 0.00011, 5),
+                        created_at=vol["CreateTime"],
+                        collected_at=collected,
+                        status=Status.OK,
+                        parent_state=vol["State"],
+                    )
                 )
-            )
-        snaps = self._ec2.describe_snapshots(OwnerIds=["self"])
-        for snap in snaps["Snapshots"]:
-            out.append(
-                ResourceSnapshot(
-                    resource_arn=_EC2.format(
-                        region=self._region, account="0", kind="snapshot", id_=snap["SnapshotId"]
-                    ),
-                    resource_type="ebs_snapshot",
-                    domain=Domain.STORAGE,
-                    region=self._region,
-                    hourly_cost=round(snap["VolumeSize"] * 0.00005, 5),
-                    created_at=snap["StartTime"],
-                    collected_at=collected,
-                    status=Status.OK,
-                    parent_state="unknown",
+        snap_pager = self._ec2.get_paginator("describe_snapshots")
+        for snap_page in snap_pager.paginate(OwnerIds=["self"]):
+            for snap in snap_page["Snapshots"]:
+                out.append(
+                    ResourceSnapshot(
+                        resource_arn=_EC2.format(
+                            region=self._region,
+                            account="0",
+                            kind="snapshot",
+                            id_=snap["SnapshotId"],
+                        ),
+                        resource_type="ebs_snapshot",
+                        domain=Domain.STORAGE,
+                        region=self._region,
+                        hourly_cost=round(snap["VolumeSize"] * 0.00005, 5),
+                        created_at=snap["StartTime"],
+                        collected_at=collected,
+                        status=Status.OK,
+                        parent_state="unknown",
+                    )
                 )
-            )
         self._cache = out
         return out
 
@@ -138,18 +142,22 @@ class AwsProvider(FabricProvider):
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
         )
-        items: list[BillingSummaryItem] = []
-        for group in resp["Groups"]:
-            amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
-            items.append(
-                BillingSummaryItem(
-                    domain=Domain.COMPUTE,
-                    service=group["Keys"][0],
-                    monthly_cost_usd=round(amount, 2),
-                    delta_vs_prev_pct=0.0,
+        totals: dict[str, float] = {}
+        for period in resp["ResultsByTime"]:
+            for group in period["Groups"]:
+                service = group["Keys"][0]
+                totals[service] = totals.get(service, 0.0) + float(
+                    group["Metrics"]["UnblendedCost"]["Amount"]
                 )
+        return [
+            BillingSummaryItem(
+                domain=Domain.COMPUTE,
+                service=service,
+                monthly_cost_usd=round(amount, 2),
+                delta_vs_prev_pct=0.0,
             )
-        return items
+            for service, amount in sorted(totals.items())
+        ]
 
     def freshness(self) -> Freshness:
         return Freshness(collected_at=datetime.now(UTC))
