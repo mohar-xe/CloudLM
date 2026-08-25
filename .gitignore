@@ -12,3 +12,6 @@ build/
 *.egg-info/
 .DS_Store
 backups/
+PLAN.md
+FLOW.md
+DECISION.md
