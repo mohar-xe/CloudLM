@@ -16,6 +16,33 @@ logger = logging.getLogger(__name__)
 
 _EC2 = "arn:aws:ec2:{region}:{account}:{kind}/{id_}"
 
+_SERVICE_DOMAINS: tuple[tuple[str, Domain], ...] = (
+    ("elastic block store", Domain.STORAGE),
+    ("ebs", Domain.STORAGE),
+    ("s3", Domain.STORAGE),
+    ("glacier", Domain.STORAGE),
+    ("elastic file system", Domain.STORAGE),
+    ("fsx", Domain.STORAGE),
+    ("storage gateway", Domain.STORAGE),
+    ("elastic kubernetes service", Domain.K8S),
+    ("virtual private cloud", Domain.NETWORK),
+    ("vpc", Domain.NETWORK),
+    ("nat gateway", Domain.NETWORK),
+    ("elastic load balancing", Domain.NETWORK),
+    ("cloudfront", Domain.NETWORK),
+    ("route 53", Domain.NETWORK),
+    ("api gateway", Domain.NETWORK),
+    ("data transfer", Domain.NETWORK),
+)
+
+
+def _service_domain(service: str) -> Domain:
+    lowered = service.lower()
+    for needle, domain in _SERVICE_DOMAINS:
+        if needle in lowered:
+            return domain
+    return Domain.COMPUTE
+
 
 def _boto() -> Any:
     try:
@@ -39,11 +66,20 @@ class AwsProvider(FabricProvider):
         except Exception:
             self._ce = None
         self._cache: list[ResourceSnapshot] | None = None
+        self._collected_at: datetime | None = None
+        self._account_id: str | None = None
+
+    def _account(self) -> str:
+        if self._account_id is None:
+            boto3 = _boto()
+            self._account_id = boto3.client("sts").get_caller_identity()["Account"]
+        return self._account_id
 
     def _collect(self) -> list[ResourceSnapshot]:
         if self._cache is not None:
             return self._cache
         collected = datetime.now(UTC)
+        account = self._account()
         out: list[ResourceSnapshot] = []
         paginator = self._ec2.get_paginator("describe_instances")
         for page in paginator.paginate():
@@ -76,7 +112,7 @@ class AwsProvider(FabricProvider):
                 out.append(
                     ResourceSnapshot(
                         resource_arn=_EC2.format(
-                            region=self._region, account="0", kind="volume", id_=vol["VolumeId"]
+                            region=self._region, account=account, kind="volume", id_=vol["VolumeId"]
                         ),
                         resource_type="ebs_volume",
                         domain=Domain.STORAGE,
@@ -95,7 +131,7 @@ class AwsProvider(FabricProvider):
                     ResourceSnapshot(
                         resource_arn=_EC2.format(
                             region=self._region,
-                            account="0",
+                            account=account,
                             kind="snapshot",
                             id_=snap["SnapshotId"],
                         ),
@@ -110,6 +146,7 @@ class AwsProvider(FabricProvider):
                     )
                 )
         self._cache = out
+        self._collected_at = collected
         return out
 
     @staticmethod
@@ -142,16 +179,10 @@ class AwsProvider(FabricProvider):
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
         )
-        totals: dict[str, float] = {}
-        for period in resp["ResultsByTime"]:
-            for group in period["Groups"]:
-                service = group["Keys"][0]
-                totals[service] = totals.get(service, 0.0) + float(
-                    group["Metrics"]["UnblendedCost"]["Amount"]
-                )
+        totals = self._aggregate_billing(resp)
         return [
             BillingSummaryItem(
-                domain=Domain.COMPUTE,
+                domain=_service_domain(service),
                 service=service,
                 monthly_cost_usd=round(amount, 2),
                 delta_vs_prev_pct=0.0,
@@ -159,5 +190,19 @@ class AwsProvider(FabricProvider):
             for service, amount in sorted(totals.items())
         ]
 
+    @staticmethod
+    def _aggregate_billing(resp: dict[str, Any]) -> dict[str, float]:
+        totals: dict[str, float] = {}
+        for period in resp["ResultsByTime"]:
+            for group in period["Groups"]:
+                service = group["Keys"][0]
+                totals[service] = totals.get(service, 0.0) + float(
+                    group["Metrics"]["UnblendedCost"]["Amount"]
+                )
+        return totals
+
     def freshness(self) -> Freshness:
-        return Freshness(collected_at=datetime.now(UTC))
+        self._collect()
+        assert self._collected_at is not None
+        return Freshness(collected_at=self._collected_at)
+
