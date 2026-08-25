@@ -1,0 +1,63 @@
+[project]
+name = "cloudlm"
+version = "0.1.0"
+description = "Approval-gated cloud FinOps agent on TrueForge"
+requires-python = ">=3.11"
+dependencies = [
+    "cloud-fabric",
+    "fabric-core",
+    "httpx>=0.27",
+]
+
+[tool.uv.workspace]
+members = ["mcp/cloud-fabric", "packages/fabric-core"]
+
+[tool.uv.sources]
+fabric-core = { workspace = true }
+cloud-fabric = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-setuptools",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["mcp/cloud-fabric/src", "packages/fabric-core/src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PTH", "ASYNC"]
+ignore = ["SIM108"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "mcp.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "boto3.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "botocore.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["mcp/cloud-fabric/src", "packages/fabric-core/src"]
